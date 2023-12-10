@@ -1,0 +1,547 @@
+import pandas as pd
+import keras_tuner as kt
+from sklearn.cluster import DBSCAN, SpectralClustering
+import tensorflow as tf
+import numpy as np
+from sklearn.cluster import AgglomerativeClustering
+import seaborn as sns
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
+from sklearn.cluster import spectral_clustering
+
+
+from sklearn import metrics
+from sklearn.decomposition import PCA
+from keras.callbacks import Callback
+from sklearn.cluster import DBSCAN
+
+from matplotlib import pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from tensorflow import keras
+from keras.models import Sequential
+from keras.layers import Dense, Dropout
+from keras.regularizers import l1, l2
+import xgboost as xgb
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.ensemble import HistGradientBoostingClassifier, AdaBoostClassifier
+from sklearn.model_selection import StratifiedKFold
+from sklearn.utils import shuffle
+
+
+
+
+### VARIABLES ###
+numberOfSets = 20
+
+trainPredictionDictionaries = {}
+testPredictionDictionaries = {}
+
+#dictionaries for data storage
+for i in range(1, numberOfSets+1):
+    pred = f'prediction{i}'
+    trainPredictionDictionaries[pred] = {}
+    testPredictionDictionaries[pred] = {}
+trainSets = {}
+trainTargets = {}
+testSets = {}
+testTargets = {}
+
+# set seed for repeatability
+randomState = 414
+tf.random.set_seed(randomState)
+
+# import data
+def import_data():
+    stringList = [str(i) for i in range(1, 42)]
+    stringList.append("BD")
+    data = pd.read_csv('data.csv', header=None, names=stringList)
+    #shuffle
+    data = shuffle(data, random_state=randomState)  # Shuffle the data
+    return data
+def split_x_y(data):
+    # Split data into features (X) and target (y)
+    X = data.drop(columns=['BD'])
+    y = data['BD']
+    return X,y
+
+# remove highly correlated data
+def remove_corrolated_data(data,corr):
+    correlationMatrix = data.corr().abs()
+    upper = correlationMatrix.where(np.triu(np.ones(correlationMatrix.shape), k=1).astype(bool))
+    toDrop = [column for column in upper.columns if any(upper[column] > corr)]
+    if toDrop:
+        # Drop highly correlated columns
+        plop = data.drop(toDrop, axis=1)
+    # Plot the correlation matrix heatmap
+    # Create a mask to hide the lower triangle of the heatmap
+    mask = np.triu(np.ones_like(upper, dtype=bool))
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(upper.T, annot=True, cmap='flare', linewidths=0.5, vmin=0, vmax=1)
+    plt.title('Correlation Matrix Heatmap')
+    maxUpper = upper.max().max()
+    plt.text(upper.shape[1]/2, upper.shape[1]/3, f'Max: {maxUpper:.2f}',
+             horizontalalignment='center', verticalalignment='center', fontsize=12, color='black', fontweight='bold')
+
+    plt.show()
+    return plop
+
+
+def create_folds(numberOfSets,X,y):
+    """
+    :param int numberOfSets: how many folds the data will be split into.
+    :param dataFrame X: all data.
+    :param series y: all target data.
+    :return: numberOfSets sets of data within dictionaries trainSets, trainTargets, testSets, testTargets
+    """
+    # Initialize StratifiedKFold with the desired number of splits
+    stratified_kf = StratifiedKFold(n_splits=numberOfSets, shuffle=True, random_state=randomState)
+    # Enumerate through the folds and store data in the dictionary
+    for fold, (train_index, test_index) in enumerate(stratified_kf.split(X, y), 1):
+        set = f'set{fold}'
+        target = f'target{fold}'
+        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+        y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+        # Store the data in the dictionary
+        trainSets[set] = X_train
+        trainTargets[target] = y_train
+        testSets[set] = X_test
+        testTargets[target] = y_test
+    del X; del y;
+    return trainSets, trainTargets, testSets, testTargets;
+
+    # Your training and testing code goes here
+    # For example, you can train your model using X_train, y_train
+    # and evaluate it using X_test, y_test
+
+
+# used inside model tuner.
+def model_builder(hp):
+  model = keras.Sequential()
+  # Tune the number of units in the first Dense layer
+  # Choose an optimal value between 32-512
+  hp_units = hp.Int('units', min_value=10, max_value=512, step=32)
+  model.add(keras.layers.Dense(units= hp_units, input_dim=41, activation='relu', kernel_regularizer=l1(0.04)))
+  model.add(Dense(1, activation='sigmoid'))
+  hp_learning_rate = hp.Choice('learning_rate', values=[1e-2, 1e-3, 1e-4])
+
+  model.compile(optimizer=keras.optimizers.Adam(learning_rate=hp_learning_rate),
+                loss='binary_crossentropy',
+                metrics=['accuracy'])
+
+  return model
+# used to tune specific variables in model
+def tune_model():
+  tuner = kt.Hyperband(model_builder,
+                       objective='val_accuracy',
+                       max_epochs=10,
+                       factor=3,
+                       directory='my_dir',
+                       project_name='intro_to_kt')
+
+  stop_early = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5)
+  tuner.search(trainSets['set1'], trainTargets['target1'], epochs=50, validation_split=0.2, callbacks=[stop_early])
+
+  # Get the optimal hyperparameters
+  best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+
+  print(f"""
+  The hyperparameter search is complete. The optimal number of units in the first densely-connected
+  layer is {best_hps.get('units')} and the optimal learning rate for the optimizer
+  is {best_hps.get('learning_rate')}.
+  """)
+
+
+# Create a Sequential for use NOT in model tuner
+def create_model(df):
+    model = Sequential()
+    # Input layer
+    model.add(Dense(64, input_dim=df.shape[1]-1, activation='relu', kernel_regularizer=l2(0.015)))
+    model.add(Dense(32, activation='relu', kernel_regularizer=l2(0.02)))
+    #Dropout layer for regularization
+    #model.add(Dropout(0.2))
+    model.add(Dense(1, activation='sigmoid'))
+    # Compile the model
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.002), loss='binary_crossentropy', metrics=['accuracy'])
+    return model
+
+def big_test(data):
+    losses = []
+    accuracies = []
+    for i in range(1, numberOfSets + 1):
+        currentTestSet = f'set{i}'
+        currentTestTarget = f'target{i}'
+        prediction = f'prediction{i}'
+        model = create_model(data)
+        model.fit(trainSets[currentTestSet], trainTargets[currentTestTarget], epochs=120, batch_size=32,verbose=2, validation_data=(testSets[currentTestSet], testTargets[currentTestTarget]))
+        loss, accuracy = (model.evaluate(testSets[currentTestSet], testTargets[currentTestTarget]))
+        losses.append(loss)
+        accuracies.append(accuracy)
+        trainPredictionDictionaries[prediction]['NN'] = pd.DataFrame(model.predict(trainSets[currentTestSet]))
+        testPredictionDictionaries[prediction]['NN'] = pd.DataFrame(model.predict(testSets[currentTestSet]))
+
+        #take averages of modelss
+        #model.save(f'model{accuracy:.4f}.keras')
+
+    print(f'average loss: {np.mean(losses)} average accuracy: {np.mean(accuracies)}')
+    print(f'std loss: {np.std(losses)} std accuracy: {np.std(accuracies)}')
+
+
+
+def quick_test(df):
+    model = create_model(df)
+    model.fit(trainSets['set1'], trainTargets['target1'], epochs=200, batch_size=32,verbose=0, validation_data=(testSets['set1'], testTargets['target1']))
+    loss, accuracy = (model.evaluate(testSets['set1'], testTargets['target1']))
+    print(f'Loss: {loss}; \n accuracy: {accuracy};')
+    print(f'std: {np.std(accuracy)}')
+    print(f'mean: {np.mean(accuracy)}')
+
+
+def gradient_boosting_quick():
+    # Create an XGBoost classifier
+    model = xgb.XGBClassifier(objective='binary:logistic', n_estimators=300, random_state=42)
+  # Train the model
+    model.fit(trainSets['set1'], trainTargets['target1'])
+
+    # Make predictions
+    predictions = model.predict(testSets['set1'])
+
+    # Calculate accuracy
+    accuracy = accuracy_score(testTargets['target1'], predictions)
+    print(f'Accuracy: {accuracy}')
+
+
+# evaluate model
+
+#order_data()
+#quick_test()
+
+def grad_boost_long():
+    accuracy = []
+    # Create an XGBoost classifier
+
+    model = xgb.XGBClassifier(objective='binary:logistic', n_estimators=100, random_state=randomState)
+
+    for i in range(1, numberOfSets+1):
+        set = f'set{i}'
+        target = f'target{i}'
+        # Train the model
+        model.fit(trainSets[set], trainTargets[target])
+        acc = accuracy_score(testTargets[target], model.predict(testSets[set]))
+        accuracy.append(acc)
+    print('grad_boost_long():')
+    print(f'    Accuracy: {accuracy}')
+    averageAccuracy = sum(accuracy) / len(accuracy)
+    print(f'    average accuracy: {averageAccuracy}')
+
+def tune_grad_boost():
+    # Define your parameter grid for tuning
+    param_grid = {
+        'n_estimators': [30, 50, 100, 200],
+        'learning_rate': [0.01, 0.05, 0.1, 0.2],
+        'max_depth': [3, 4, 5, 6],
+        'min_child_weight': [1, 2, 3],
+        'gamma': [0, 0.1, 0.2],
+        'subsample': [0.8, 0.9, 1.0],
+        'colsample_bytree': [0.8, 0.9, 1.0]
+    }
+
+    # Create an XGBoost classifier
+    xgb_model = xgb.XGBClassifier(objective='binary:logistic', random_state=randomState)
+
+    # Use GridSearchCV for hyperparameter tuning
+    grid_search = GridSearchCV(estimator=xgb_model, param_grid=param_grid, scoring='accuracy', cv=5)
+    grid_search.fit(trainSets['set1'], trainTargets['target1'])  # X_train and y_train are your training data
+
+    # Print the best hyperparameters found
+    print("Best Hyperparameters:", grid_search.best_params_)
+
+def tuned_grad_boost_long():
+    accuracy = []
+    # Create an XGBoost classifier
+
+    best_params = {'colsample_bytree': 0.4,
+                   'gamma': 0,
+                   'learning_rate': 0.1,
+                   'max_depth': 2,
+                   'min_child_weight': 3,
+                   'n_estimators': 200,
+                   'subsample': 0.8}
+
+    for i in range(1, numberOfSets + 1):
+        set = f'set{i}'
+        target = f'target{i}'
+        prediction = f'prediction{i}'
+
+        model = xgb.XGBClassifier(**best_params, random_state=randomState)
+        # Train the model
+        model.fit(trainSets[set], trainTargets[target])
+        acc = accuracy_score(testTargets[target], model.predict(testSets[set]))
+        accuracy.append(acc)
+        #testSets[set]['predictions'] = model.predict(testSets[set])
+        #trainSets[set]['predictions'] = model.predict(trainSets[set])
+        trainPredictionDictionaries[prediction]['gradBoost'] = pd.DataFrame(model.predict_proba(trainSets[set]))
+        testPredictionDictionaries[prediction]['gradBoost'] = pd.DataFrame(model.predict_proba(testSets[set]))
+
+
+
+    print('tuned_grad_boost_long()')
+    print(f'    mean: {np.mean(accuracy)}')
+    print(f'    std: {np.std(accuracy)}')
+
+#tune_grad_boost()
+
+
+
+
+
+
+    #order_data()A
+    #tuned_grad_boost_long()
+    #quick_test()
+    #big_test()
+
+
+def hist_fit():
+    acc = []
+    for i in range(1, numberOfSets+1):
+        set = f'set{i}'
+        target = f'target{i}'
+        prediction = f'prediction{i}'
+        r = 0.4 #regulization
+        lr = 0.03 #learning rate
+        i = 1000 # itarations
+        mb = 150 #max bins
+        md = 3 #max depth
+        t = 0.000000001
+
+        clf = HistGradientBoostingClassifier(l2_regularization=r,random_state=randomState,learning_rate=lr,max_iter=i, max_bins=mb, max_depth=md,tol=t)
+
+        clf.fit(trainSets[set], trainTargets[target])
+        acc.append(clf.score(testSets[set], testTargets[target]))
+        trainPredictionDictionaries[prediction]['histFit'] = pd.DataFrame(clf.predict_proba(trainSets[set]))
+        testPredictionDictionaries[prediction]['histFit'] = pd.DataFrame(clf.predict_proba(testSets[set]))
+
+
+    print('hist_fit():')
+    print(f'    mean: {np.mean(acc)}')
+    print(f'    std: {np.std(acc)}')
+
+
+
+def ada_boost():
+    acc = []
+    acc2 = []
+
+    # Loop through the sets
+    for i in range(1, numberOfSets + 1):
+        set_name = f'set{i}'
+        target_name = f'target{i}'
+        prediction = f'prediction{i}'
+        # Set hyperparameters
+        lr = 0.45  # learning rate
+        ne = 100 # number of estimators before termination (50 default)
+        algo = 'SAMME.R'
+        # Create and train AdaBoostClassifier
+        clf = AdaBoostClassifier(random_state=randomState,learning_rate=lr,n_estimators=ne,algorithm=algo)
+        clf.fit(trainSets[set_name], trainTargets[target_name])
+
+        # Evaluate the model and store accuracy
+        train_accuracy = clf.score(trainSets[set_name], trainTargets[target_name])
+        test_accuracy = clf.score(testSets[set_name], testTargets[target_name])
+        acc.append(test_accuracy)
+        acc2.append(train_accuracy)
+        trainPredictionDictionaries[prediction]['adaBoost'] = pd.DataFrame(clf.predict_proba(trainSets[set_name]))
+        testPredictionDictionaries[prediction]['adaBoost'] = pd.DataFrame(clf.predict_proba(testSets[set_name]))
+
+
+
+        # Print accuracies
+    print("ada_boost()")
+    print(f'    test accuracy: {acc}')
+    print(f'    mean: {np.mean(acc):.6f}')
+    print(f'    std: {np.std(acc)}')
+
+
+
+def hist_fit_quick():
+    set = f'set1'
+    target = f'target1'
+    r = 1  # regulization
+    lr = 0.02  # learning rate
+    i = 1000  # itarations
+    mb = 80  # max bins
+    md = 3  # max depth
+
+    clf = HistGradientBoostingClassifier(l2_regularization=r, random_state=randomState, learning_rate=lr, max_iter=i,
+                                         max_bins=mb, max_depth=md)
+
+    clf.fit(trainSets[set], trainTargets[target])
+    print(f'Train accuracy: {clf.score(trainSets[set], trainTargets[target]):.6f}')
+    print(f'Test accuracy: {clf.score(testSets[set], testTargets[target]):.6f}')
+
+def groupies():
+    groups = {}
+    targets = {}
+    test_targets = {}
+    test_groups = {}
+    for i in range(1, numberOfSets+1):
+        set = f'set{i}'
+        target = f'target{i}'
+        # Create a PCA model
+        pca1 = PCA(n_components=1)
+        pca = PCA(n_components=2)
+        # Fit the model and transform the data
+        X_pca1 = pca1.fit_transform(trainSets[set])
+        X_test_pca1 = pca1.transform(testSets[set])
+
+        # Perform GMM clustering
+        gmm = GaussianMixture(n_components=4, random_state=randomState)  # Adjust the number of components as needed
+        cluster_labels = gmm.fit_predict(X_pca1)
+        test_cluster_labels = gmm.predict(X_test_pca1)
+
+        X_pca2 = pca.fit_transform(trainSets[set])
+        X_test_pca2 = pca.transform(testSets[set])
+
+        if (i != i): # set number
+            # Plot GMM cluster boundaries
+            x_min, x_max = X_pca2[:, 0].min() - 1, X_pca2[:, 0].max() + 1
+            y_min, y_max = X_pca2[:, 1].min() - 1, X_pca2[:, 1].max() + 1
+
+            grid_step = 0.1  # You can adjust this value based on your data and computational resources
+            xx, yy = np.meshgrid(np.arange(x_min, x_max, grid_step), np.arange(y_min, y_max, grid_step))
+            Z = gmm.predict(np.c_[xx.ravel()])
+            Z = Z.reshape(xx.shape)
+
+
+            # Plot filled contours for each GMM cluster
+            plt.figure(figsize=(8, 6))
+            plt.contourf(xx, yy, Z, levels=np.arange(len(np.unique(cluster_labels)) + 1) - 0.5, cmap='Set1', alpha=0.3)
+
+            # Scatter plot for the original data points with binary coloring
+            sns.scatterplot(x=X_pca2[:, 0], y=X_pca2[:, 1], hue=trainTargets[target], palette='Set1', edgecolor='k',
+                            s=50)
+            plt.xlabel('PCA Component 1', fontweight='bold')
+            plt.ylabel('PCA Component 2', fontweight='bold')
+            plt.title('PCA Plot with GMM Clustering', fontweight='bold')
+            plt.show()
+
+            plt.figure(figsize=(8, 6))
+            sns.scatterplot(x=X_pca2[:, 0], y=X_pca2[:, 1], hue=cluster_labels, palette='Set1', edgecolor='k', s=50)
+
+            # Add labels and title
+            plt.xlabel('PCA Component 1', fontweight='bold')
+            plt.ylabel('PCA Component 2', fontweight='bold')
+            plt.title('PCA Plot with GMM Clustering (Colored by Cluster)', fontweight='bold')
+            plt.show()
+
+        # Create a new dataframe with the original data and the assigned cluster labels
+        clustered_data = pd.DataFrame(data=trainSets[set], columns=trainSets[set].columns)
+        clustered_target = pd.DataFrame(data=trainTargets[target])
+        clustered_test_data = pd.DataFrame(data=testSets[set], columns=testSets[set].columns)
+        clustered_test_target = pd.DataFrame(data=testTargets[target])
+        clustered_data['Cluster'] = cluster_labels
+        clustered_target['Cluster'] = cluster_labels
+        clustered_test_data['Cluster'] = test_cluster_labels
+        clustered_test_target['Cluster'] = test_cluster_labels
+
+        groups[set] = clustered_data
+        targets[target] = clustered_target
+        test_targets[set] = clustered_test_data
+        test_groups[target] = clustered_test_target
+
+    return groups, targets, test_targets, test_groups
+
+# Example usage:
+# peeceeayy()
+
+
+from sklearn.experimental import enable_hist_gradient_boosting  # noqa
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import accuracy_score
+def train_and_validate_groups(groups, targets, test_groups, test_targets):
+    models = {}  # To store the trained models for each cluster
+    train_predictions = {}  # To store predictions on the training set
+    test_predictions = {}  # To store predictions on the test set
+    trainTotal = 0
+    testTotal = 0
+    testMeans = 0
+    testStd = 0
+    trainMeans = 0
+    quay = 1
+    for set_key in groups.keys():
+        set_data = groups[set_key]
+        target_key = f'target{quay}'  # Extract the numeric part from the set_key
+        quay += 1
+        set_target = targets[target_key]
+        test_set_data = test_groups[set_key]
+        test_set_target = test_targets[target_key]
+
+        for cluster in set_data['Cluster'].unique():
+            # Select data for the current cluster
+            train_data = set_data[set_data['Cluster'] == cluster].drop('Cluster', axis=1)
+            train_target = set_target[set_target['Cluster'] == cluster].drop('Cluster', axis=1).squeeze()
+
+            test_data = test_set_data[test_set_data['Cluster'] == cluster].drop('Cluster', axis=1)
+            test_target = test_set_target[test_set_target['Cluster'] == cluster].drop('Cluster', axis=1).squeeze()
+
+            if (len(train_target) != 0 and type(test_target) is not np.int64 and len(test_target) != 0):
+                itter = int(1200000/len(train_data)+500)
+                ada = True
+                if (ada == False):
+                    # Initialize and train the model
+                    r = 2 # regulization
+                    lr = 0.005 # learning rate
+                    i = itter  # itarations
+                    mb = 100  # max bins
+                    md = 3  # max depth
+                    t = 0.0000001
+
+                    model = HistGradientBoostingClassifier(l2_regularization=r, random_state=randomState, learning_rate=lr,
+                                                         max_iter=i, max_bins=mb, max_depth=md, tol=t)
+                    model.fit(train_data, train_target)
+                if (ada):
+
+                    model = xgb.XGBClassifier(objective='binary:logistic', n_estimators=200, random_state=randomState)
+                    model.fit(train_data, train_target)
+
+                # Make predictions on the training and test sets
+                train_pred = model.predict(train_data)
+                test_pred = model.predict(test_data)
+
+                # Store the trained model and predictions
+                models[f'{set_key}_Cluster_{cluster}'] = model
+                train_predictions[f'{set_key}_Cluster_{cluster}'] = train_pred
+                test_predictions[f'{set_key}_Cluster_{cluster}'] = test_pred
+
+                # Print accuracy for the training set
+                train_accuracy = accuracy_score(train_target, train_pred)
+                test_accuracy = accuracy_score(test_target, test_pred)
+                titer = itter * len(train_data)
+                print(f'{set_key} - Cluster {cluster} - Train Acc: {train_accuracy:.2f} Test acc: {test_accuracy} ntrain: {len(train_data)} nTest: {len(test_data)} itter: {itter} titter: {titer}'  )
+                trainTotal += len(train_data)
+                testTotal += len(test_data)
+                trainMeans += train_accuracy*len(train_data)
+                testMeans += test_accuracy*len(test_data)
+
+    print(f'test mean: {trainMeans/trainTotal} train mean: {testMeans/testTotal}' )
+
+    return models, train_predictions, test_predictions
+
+
+
+
+
+#import data
+data = import_data()
+#sort data
+#data = remove_corrolated_data(data,0.92)
+x, y = split_x_y(data)
+create_folds(numberOfSets,x,y)
+groups, targets, test_groups, test_targets  = groupies()
+
+train_and_validate_groups(groups, targets, test_groups, test_targets)
+
